@@ -51,8 +51,18 @@ func (stats *Stats) logCounterChanges(interval time.Duration, quitAfterMin uint)
 	}
 }
 
-func (stats *Stats) gotHash(cntAll int64, cntEmpty int64) {
-	stats.hashes.Store(cntAll*2 - cntEmpty)
+func (stats *Stats) gotHash(startExists bool, endExists bool) {
+	add := 0
+
+	if !startExists {
+		add++
+	}
+
+	if !endExists {
+		add++
+	}
+
+	stats.hashes.Add(int64(add))
 	stats.queriesWithoutResult.Store(0)
 	stats.secondsWithoutResult.Store(0)
 }

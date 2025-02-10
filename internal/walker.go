@@ -13,10 +13,8 @@ import (
 )
 
 const (
-	DomainGeneratorCntMultiplier = 3
-	DomainGeneratorMaxLength     = 20
-	WaitMs                       = 100
-	sizeChanDomainStr            = 100
+	WaitMs         = 100
+	sizeChanDomain = 500
 )
 
 type NSec3Walker struct {
@@ -24,7 +22,7 @@ type NSec3Walker struct {
 	stats  Stats
 	ranges *RangeIndex
 
-	chanDomains     chan string
+	chanDomain      chan *Domain
 	chanHashesFound chan Nsec3Record
 	chanHashesNew   chan string
 
@@ -87,12 +85,10 @@ func (nw *NSec3Walker) Run() (err error) {
 		return
 	}
 
-	cntDomainGen := len(nw.config.DomainDnsServers) * DomainGeneratorCntMultiplier
-	nw.chanDomains = make(chan string, cntDomainGen)
+	nw.chanDomain = make(chan *Domain, sizeChanDomain)
+	dg := NewDomainGenerator(nw.nsec.domain, nw.nsec.salt, nw.nsec.iterations, nw.ranges)
 
-	for i := 0; i < cntDomainGen; i++ {
-		go nw.domainGenerator()
-	}
+	dg.Run(nw.chanDomain)
 
 	for _, ns := range nw.config.DomainDnsServers {
 		go nw.workerForAuthNs(ns)
@@ -129,7 +125,7 @@ func (nw *NSec3Walker) processHashes() (err error) {
 			fmt.Printf("%s:.%s:%s:%d\n", hash.End, nw.nsec.domain, nw.nsec.salt, nw.nsec.iterations)
 		}
 
-		nw.stats.gotHash(nw.ranges.cntChains.Load(), nw.ranges.cntChainsEmpty.Load())
+		nw.stats.gotHash(startExists, endExists)
 
 		if nw.ranges.isFinished() {
 			if nw.config.Verbose {
@@ -156,39 +152,6 @@ func (nw *NSec3Walker) initNsec3Values() (err error) {
 	}
 
 	return fmt.Errorf("could not get NSEC3 values from any of the DNS servers")
-}
-
-func (nw *NSec3Walker) domainStringGenerator(chanDomains chan string) {
-	chars := []rune("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789")
-	chLen := len(chars)
-
-	for {
-		result := []rune{
-			chars[rand.Intn(chLen)],
-			chars[rand.Intn(chLen)],
-		}
-
-		for i := 0; i < DomainGeneratorMaxLength-2; i++ {
-			result = append(result, chars[rand.Intn(chLen)])
-			domain := string(result) + "." + nw.nsec.domain
-
-			chanDomains <- domain
-		}
-	}
-}
-
-func (nw *NSec3Walker) domainGenerator() {
-	chanDomainStr := make(chan string, sizeChanDomainStr)
-
-	go nw.domainStringGenerator(chanDomainStr)
-
-	for domain := range chanDomainStr {
-		if nw.isDomainInRange(domain) {
-			continue
-		}
-
-		nw.chanDomains <- domain
-	}
 }
 
 func (nw *NSec3Walker) extractNSEC3Hashes(domain string, authNsServer string) (err error) {
@@ -251,10 +214,14 @@ func (nw *NSec3Walker) setNsec3Values(salt string, iterations uint16) (err error
 }
 
 func (nw *NSec3Walker) workerForAuthNs(ns string) {
-	for domain := range nw.chanDomains {
+	for domain := range nw.chanDomain {
+		if nw.isDomainInRange(domain) {
+			continue
+		}
+
 		time.Sleep(time.Millisecond * WaitMs)
 
-		err := nw.extractNSEC3Hashes(domain, ns)
+		err := nw.extractNSEC3Hashes(domain.Domain, ns)
 		nw.stats.didQuery()
 
 		if err != nil {
@@ -278,17 +245,11 @@ func (nw *NSec3Walker) logVerbose(text string) {
 	}
 }
 
-func (nw *NSec3Walker) isDomainInRange(domain string) (inRange bool) {
-	hash, err := CalculateNSEC3(domain, nw.nsec.salt, nw.nsec.iterations)
-
-	if err != nil {
-		log.Fatalf("Error calculating NSEC3 for %s: %v\n", domain, err)
-	}
-
-	inRange, where := nw.ranges.isHashInRange(hash)
+func (nw *NSec3Walker) isDomainInRange(domain *Domain) (inRange bool) {
+	inRange, where := nw.ranges.isHashInRange(domain.Hash)
 
 	if inRange {
-		nw.logVerbose(fmt.Sprintf("Domain in range [%s] <= %s (%s)", where, hash, domain))
+		nw.logVerbose(fmt.Sprintf("Domain in range [%s] <= %s (%s)", where, domain.Hash, domain.Domain))
 	}
 
 	return

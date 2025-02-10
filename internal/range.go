@@ -14,9 +14,23 @@ type HashTree struct {
 	mutex sync.RWMutex
 }
 
+type RangeIndex struct {
+	index              *HashTree
+	cntEndWithoutStart atomic.Int64
+	ignoreChanges      bool
+	addMutex           sync.Mutex
+}
+
 func NewHashTree() (hashTree *HashTree) {
 	hashTree = &HashTree{
 		tree: rbt.NewWithStringComparator(),
+	}
+	return
+}
+
+func NewRangeIndex() (rangeIndex *RangeIndex) {
+	rangeIndex = &RangeIndex{
+		index: NewHashTree(),
 	}
 	return
 }
@@ -99,21 +113,6 @@ func (ht *HashTree) ClosestBefore(input string) (startHash string, endHash strin
 	return
 }
 
-type RangeIndex struct {
-	index          *HashTree
-	cntChains      atomic.Int64
-	cntChainsEmpty atomic.Int64
-	ignoreChanges  bool // TODO never used
-	addMutex       sync.Mutex
-}
-
-func NewRangeIndex() (rangeIndex *RangeIndex) {
-	rangeIndex = &RangeIndex{
-		index: NewHashTree(),
-	}
-	return
-}
-
 func (ri *RangeIndex) PrintAll() {
 	ri.index.PrintAll()
 }
@@ -123,7 +122,7 @@ func (ri *RangeIndex) Add(hashStart string, hashEnd string) (existsStart bool, e
 	If hashStart key already exists, check the value didn't change (hashEnd)
 	If hashEnd does not exists, add it with empty value
 	*/
-	ri.addMutex.Lock() // this mutex is for ensuring correct values of cntChains and cntChainsEmpty
+	ri.addMutex.Lock() // this mutex is for ensuring correct values of cntChains and cntEndWithoutStart
 	existingStartValAsStart, existsStart := ri.index.Get(hashStart)
 	_, existsEnd = ri.index.Get(hashEnd)
 
@@ -135,28 +134,31 @@ func (ri *RangeIndex) Add(hashStart string, hashEnd string) (existsStart bool, e
 	if existsAndDifferentEnd {
 		msg := "range starting %s already exists with different hashEnd! Existing: %s | New: %s"
 		err = fmt.Errorf(msg, hashStart, existingStartValAsStart, hashEnd)
+
+		if !ri.ignoreChanges {
+			ri.addMutex.Unlock()
+
+			return
+		}
 	}
 
 	// existsStartWithEmptyEnd = start exists and end is empty, from being End before
 	existsStartWithEmptyEnd := existsStart && existingStartValAsStart == ""
-	updateStartValue := !existsStart || existsStartWithEmptyEnd || (existsAndDifferentEnd && ri.ignoreChanges)
-
-	if !existsStart {
-		ri.cntChains.Add(1)
-	}
+	setFull := !existsStart || existsStartWithEmptyEnd
 
 	if existsStartWithEmptyEnd {
-		ri.cntChainsEmpty.Add(-1)
+		ri.cntEndWithoutStart.Add(-1)
 	}
 
-	if updateStartValue {
+	if setFull {
 		ri.index.Add(hashStart, hashEnd)
 	}
 
 	if !existsEnd {
-		ri.cntChainsEmpty.Add(1)
+		ri.cntEndWithoutStart.Add(1)
 		ri.index.Add(hashEnd, "")
 	}
+
 	ri.addMutex.Unlock()
 
 	return
@@ -185,7 +187,7 @@ func (ri *RangeIndex) isHashInRange(hash string) (inRange bool, exactRange strin
 }
 
 func (ri *RangeIndex) isFinished() (isFinished bool) {
-	if ri.cntChainsEmpty.Load() == 0 {
+	if ri.cntEndWithoutStart.Load() == 0 {
 		if ri.index.allRangesComplete() {
 			isFinished = true
 		}
