@@ -1,7 +1,7 @@
 package nsec3walker
 
 import (
-	"log"
+	"fmt"
 	"math"
 	"os"
 	"sync/atomic"
@@ -9,10 +9,17 @@ import (
 )
 
 type Stats struct {
+	out                  *Output
 	queries              atomic.Int64
 	hashes               atomic.Int64
 	queriesWithoutResult atomic.Int64
 	secondsWithoutResult atomic.Int64
+}
+
+func NewStats(out *Output) *Stats {
+	return &Stats{
+		out: out,
+	}
 }
 
 func (stats *Stats) logCounterChanges(interval time.Duration, quitAfterMin uint) {
@@ -37,15 +44,16 @@ func (stats *Stats) logCounterChanges(interval time.Duration, quitAfterMin uint)
 		secWithoutResult := stats.secondsWithoutResult.Load()
 
 		msg := "In the last %v: Queries total/change %d/%d | Hashes total/change: %d/%d | Ratio total/change %d%%/%d%%"
-		msg += " | Without answer: %d , seconds %d\n"
-		log.Printf(msg, interval, cntQ, deltaQ, cntH, deltaH, ratioTotal, ratioDelta, qWithoutResult, secWithoutResult)
+		msg += " | Without answer: %d , seconds %d"
+		msgLog := fmt.Sprintf(msg, interval, cntQ, deltaQ, cntH, deltaH, ratioTotal, ratioDelta, qWithoutResult, secWithoutResult)
+		stats.out.Log(msgLog)
 
 		cntQueryLast = cntQ
 		cntHashLast = cntH
 		stats.secondsWithoutResult.Add(int64(interval.Seconds()))
 
 		if stats.secondsWithoutResult.Load() >= int64(quitAfterMin*60) {
-			log.Printf("No new hashes for %d seconds, quitting\n", secWithoutResult)
+			stats.out.Log(fmt.Sprintf("No new hashes for %d seconds, quitting", secWithoutResult))
 			os.Exit(0)
 		}
 	}

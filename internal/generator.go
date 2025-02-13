@@ -1,7 +1,6 @@
 package nsec3walker
 
 import (
-	"log"
 	"runtime"
 )
 
@@ -13,6 +12,7 @@ const (
 type DomainGenerator struct {
 	chanDomain  chan *Domain
 	ranges      *RangeIndex
+	out         *Output
 	nsec3Domain string
 	nsec3Salt   string
 	nsec3Iter   uint16
@@ -31,10 +31,12 @@ func NewDomainGenerator(
 	nsec3Salt string,
 	nsec3Iter uint16,
 	ranges *RangeIndex,
+	output *Output,
 ) *DomainGenerator {
 	return &DomainGenerator{
 		chanDomain:  make(chan *Domain, cntChanDomain),
 		ranges:      ranges,
+		out:         output,
 		nsec3Domain: nsec3Domain,
 		nsec3Salt:   nsec3Salt,
 		nsec3Iter:   nsec3Iter,
@@ -59,7 +61,7 @@ func (dg *DomainGenerator) hashWorker(chanOut chan *Domain) {
 		domain.Hash, err = CalculateNSEC3(domain.Domain, dg.nsec3Salt, dg.nsec3Iter)
 
 		if err != nil {
-			log.Printf("Error calculating NSEC3 hash for domain %s: %v", domain.Domain, err)
+			dg.out.Log("Error calculating NSEC3 hash for domain " + domain.Domain + ": " + err.Error())
 
 			continue
 		}

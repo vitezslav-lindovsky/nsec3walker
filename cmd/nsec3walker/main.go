@@ -18,10 +18,16 @@ func main() {
 	}
 
 	if config.Domain == "" {
-		log.Fatalf("Provide a domain to walk.\n")
+		log.Fatal("Provide a domain to walk.")
 	}
 
-	nw := nsec3walker.NewNSec3Walker(config)
+	output, err := nsec3walker.NewOutput(config.FilePathPrefix)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	nw := nsec3walker.NewNSec3Walker(config, output)
 
 	if config.DebugDomain != "" {
 		err = nw.RunDebug(config.DebugDomain)
@@ -33,7 +39,9 @@ func main() {
 		err = nw.Run()
 	}
 
+	output.Close()
+
 	if err != nil {
-		log.Fatalf("Error: %v\n", err)
+		output.Fatal(err)
 	}
 }

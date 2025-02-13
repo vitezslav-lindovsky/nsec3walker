@@ -3,9 +3,7 @@ package nsec3walker
 import (
 	"errors"
 	"fmt"
-	"log"
 	"math/rand"
-	"os"
 	"strings"
 	"time"
 
@@ -19,30 +17,37 @@ const (
 
 type NSec3Walker struct {
 	config Config
-	stats  Stats
+	stats  *Stats
 	ranges *RangeIndex
+	out    *Output
+	nsec   Nsec3Params
 
 	chanDomain      chan *Domain
 	chanHashesFound chan Nsec3Record
 	chanHashesNew   chan string
+}
 
-	nsec struct {
-		domain     string
-		salt       string
-		iterations uint16
-	}
+type Nsec3Params struct {
+	domain     string
+	salt       string
+	iterations uint16
 }
 
 type Nsec3Record struct {
 	Start string
 	End   string
+	Types []uint16
 }
 
-func NewNSec3Walker(config Config) (nsecWalker *NSec3Walker) {
+func NewNSec3Walker(config Config, output *Output) (nsecWalker *NSec3Walker) {
+	stats := NewStats(output)
+
 	nsecWalker = &NSec3Walker{
 		config:          config,
 		chanHashesFound: make(chan Nsec3Record, 1000),
 		ranges:          NewRangeIndex(),
+		out:             output,
+		stats:           stats,
 	}
 
 	nsecWalker.nsec.domain = config.Domain
@@ -51,8 +56,8 @@ func NewNSec3Walker(config Config) (nsecWalker *NSec3Walker) {
 }
 
 func (nw *NSec3Walker) RunDebug(domain string) (err error) {
-	log.Println("Showing debug data for domain: ", domain)
-	log.Println("NS servers to walk: ", nw.config.DomainDnsServers)
+	nw.out.Log("Showing debug data for domain: " + domain)
+	nw.out.Log(fmt.Sprintf("NS servers to walk: %v", nw.config.DomainDnsServers))
 
 	for _, ns := range nw.config.DomainDnsServers {
 		r, err := getNsResponse(domain, ns)
@@ -76,8 +81,8 @@ func (nw *NSec3Walker) RunDebug(domain string) (err error) {
 }
 
 func (nw *NSec3Walker) Run() (err error) {
-	log.Printf("Starting NSEC3 walker for domain [%s]\n", nw.nsec.domain)
-	log.Println("NS servers to walk: ", nw.config.DomainDnsServers)
+	nw.out.Log("Starting NSEC3 walker for domain [" + nw.nsec.domain + "]")
+	nw.out.Log(fmt.Sprintf("NS servers to walk: %v", nw.config.DomainDnsServers))
 
 	err = nw.initNsec3Values()
 
@@ -86,8 +91,7 @@ func (nw *NSec3Walker) Run() (err error) {
 	}
 
 	nw.chanDomain = make(chan *Domain, sizeChanDomain)
-	dg := NewDomainGenerator(nw.nsec.domain, nw.nsec.salt, nw.nsec.iterations, nw.ranges)
-
+	dg := NewDomainGenerator(nw.nsec.domain, nw.nsec.salt, nw.nsec.iterations, nw.ranges, nw.out)
 	dg.Run(nw.chanDomain)
 
 	for _, ns := range nw.config.DomainDnsServers {
@@ -109,30 +113,32 @@ func (nw *NSec3Walker) processHashes() (err error) {
 
 		if err != nil {
 			if nw.config.StopOnChange {
-				return
+				return // The error message will be printed by the caller
 			}
 
 			// If the zone changes, and we don't quit, we can't determine if the chain is complete,
 			// so will need to rely on the timeout
-			log.Println(err)
-		}
-
-		if !startExists {
-			fmt.Printf("%s:.%s:%s:%d\n", hash.Start, nw.nsec.domain, nw.nsec.salt, nw.nsec.iterations)
-		}
-
-		if !endExists {
-			fmt.Printf("%s:.%s:%s:%d\n", hash.End, nw.nsec.domain, nw.nsec.salt, nw.nsec.iterations)
+			nw.out.Log(err.Error())
 		}
 
 		nw.stats.gotHash(startExists, endExists)
 
+		if !startExists {
+			nw.out.Hash(hash.Start, nw.nsec)
+			nw.out.Map(hash, nw.nsec.salt, nw.nsec.iterations)
+		}
+
+		if !endExists {
+			nw.out.Hash(hash.End, nw.nsec)
+		}
+
 		if nw.ranges.isFinished() {
+			// TODO this will be removed, see .map file
 			if nw.config.Verbose {
 				nw.ranges.PrintAll()
 			}
 
-			log.Printf("Finished with %d hashes\n", nw.stats.hashes.Load())
+			nw.out.Log(fmt.Sprintf("Finished with %d hashes", nw.stats.hashes.Load()))
 
 			return
 		}
@@ -142,6 +148,7 @@ func (nw *NSec3Walker) processHashes() (err error) {
 }
 
 func (nw *NSec3Walker) initNsec3Values() (err error) {
+	// TODO user NSEC3PARAM
 	for _, ns := range nw.config.DomainDnsServers {
 		randomDomain := fmt.Sprintf("%d-%d.%s", time.Now().UnixMilli(), rand.Uint32(), nw.nsec.domain)
 		err = nw.extractNSEC3Hashes(randomDomain, ns)
@@ -149,6 +156,8 @@ func (nw *NSec3Walker) initNsec3Values() (err error) {
 		if err == nil {
 			return
 		}
+
+		nw.out.Log(err.Error())
 	}
 
 	return fmt.Errorf("could not get NSEC3 values from any of the DNS servers")
@@ -156,6 +165,7 @@ func (nw *NSec3Walker) initNsec3Values() (err error) {
 
 func (nw *NSec3Walker) extractNSEC3Hashes(domain string, authNsServer string) (err error) {
 	r, err := getNsResponse(domain, authNsServer)
+
 	if err != nil {
 		return
 	}
@@ -163,9 +173,7 @@ func (nw *NSec3Walker) extractNSEC3Hashes(domain string, authNsServer string) (e
 	for _, rr := range r.Ns {
 		if nsec, ok := rr.(*dns.NSEC); ok {
 			if strings.HasPrefix(nsec.NextDomain, "\\000") {
-				log.Printf("Black lies detected on %s, skipping this name server\n", authNsServer)
-
-				return errors.New("black lies")
+				return errors.New("Black lies detected on " + authNsServer + ", skipping this name server")
 			}
 		}
 
@@ -173,21 +181,18 @@ func (nw *NSec3Walker) extractNSEC3Hashes(domain string, authNsServer string) (e
 			err = nw.setNsec3Values(nsec3.Salt, nsec3.Iterations)
 
 			if err != nil {
-				log.Println(err)
-
 				// salt or iterations changed, we need to start over
-				if nw.config.StopOnChange {
-					os.Exit(1)
-				}
+				nw.out.Fatal(err)
 			}
 
 			hashStart := strings.ToLower(strings.Split(nsec3.Header().Name, ".")[0])
 			hashEnd := strings.ToLower(nsec3.NextDomain)
+
 			if hashStart[:len(hashStart)-1] == hashEnd[:len(hashStart)-1] {
-				log.Printf("White lies detected on %s, skipping this name server\n", authNsServer)
-				return errors.New("white lies")
+				return errors.New("White lies detected on " + authNsServer + ", skipping this name server")
 			}
-			nw.chanHashesFound <- Nsec3Record{hashStart, hashEnd}
+
+			nw.chanHashesFound <- Nsec3Record{hashStart, hashEnd, nsec3.TypeBitMap}
 		}
 	}
 
@@ -232,7 +237,7 @@ func (nw *NSec3Walker) workerForAuthNs(ns string) {
 				continue
 			}
 
-			log.Printf("Error querying %s: %v\n", domain, err)
+			nw.out.Log(fmt.Sprintf("Error querying %s: %v", domain, err))
 
 			continue
 		}
@@ -241,7 +246,7 @@ func (nw *NSec3Walker) workerForAuthNs(ns string) {
 
 func (nw *NSec3Walker) logVerbose(text string) {
 	if nw.config.Verbose {
-		log.Println(text)
+		nw.out.Log(text)
 	}
 }
 

@@ -17,12 +17,13 @@ type Config struct {
 	DebugDomain           string
 	Domain                string
 	DomainDnsServers      []string
+	FilePathPrefix        string
 	GenericDnsServers     []string
 	Help                  bool
 	LogCounterIntervalSec uint
 	QuitAfterMin          uint
-	Verbose               bool
 	StopOnChange          bool
+	Verbose               bool
 }
 
 func NewConfig() (config Config, err error) {
@@ -60,6 +61,7 @@ func NewConfig() (config Config, err error) {
 	rootCmd.Flags().UintVar(&config.LogCounterIntervalSec, "progress", LogCounterIntervalSec, "Counters print interval in seconds")
 	rootCmd.Flags().UintVar(&config.QuitAfterMin, "quit-after", QuitAfterMin, "Quit after X minutes of no new hashes")
 	rootCmd.Flags().StringVar(&config.DebugDomain, "debug-domain", "", "Will print debug info for a specified domain")
+	rootCmd.Flags().StringVarP(&config.FilePathPrefix, "output", "o", "", "Path and prefix for output files. ../directory/prefix")
 	rootCmd.Flags().BoolVar(&config.StopOnChange, "stop-on-change", false, "Will stop the walker if the zone changed")
 
 	if err := rootCmd.Execute(); err != nil {
@@ -75,6 +77,10 @@ func NewConfig() (config Config, err error) {
 
 	if len(config.DomainDnsServers) == 0 {
 		config.DomainDnsServers, err = getAuthNsServers(config.Domain, config.GenericDnsServers)
+	}
+
+	if config.FilePathPrefix != "" {
+		config.FilePathPrefix, err = GetOutputFilePrefix(config.FilePathPrefix, config.Domain)
 	}
 
 	return
