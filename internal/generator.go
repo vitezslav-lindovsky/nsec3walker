@@ -1,7 +1,12 @@
 package nsec3walker
 
 import (
+	"fmt"
+	"hash/crc32"
+	"os"
 	"runtime"
+	"strconv"
+	"time"
 )
 
 const (
@@ -75,7 +80,7 @@ func (dg *DomainGenerator) hashWorker(chanOut chan *Domain) {
 }
 
 func (dg *DomainGenerator) generateDomains() {
-	suffix := "." + dg.nsec3Domain
+	suffix := dg.getRandomPrefix() + "." + dg.nsec3Domain
 
 	for {
 		dg.chanDomain <- &Domain{Domain: dg.toString() + suffix}
@@ -123,4 +128,13 @@ func (dg *DomainGenerator) toString() string {
 	}
 
 	return string(result)
+}
+
+func (dg *DomainGenerator) getRandomPrefix() (prefix string) {
+	machineID := os.Getppid()
+	pid := os.Getpid()
+	timestamp := time.Now().UnixNano()
+	prefix = strconv.Itoa(int(crc32.ChecksumIEEE([]byte(fmt.Sprintf("%d%d%d", machineID, pid, timestamp)))))
+
+	return
 }
